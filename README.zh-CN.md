@@ -2,7 +2,7 @@
 
 **一个用于查询与收藏演员和影片的机器人, 可自动保存磁链到 Pikpak。**
 
-欢迎 issue 和 pr，可通过邮箱 [akynazh@qq.com](mailto://akynazh@qq.com) 或电报 [@jackbryant286](https://t.me/jackbryant286) 联系我。
+欢迎 issue 和 pr。
 
 [English Documentation](README.md)
 
