@@ -3,6 +3,7 @@ import json
 import redis
 import typing
 import logging
+import threading
 
 LOG = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ class BotFileDb:
         :param str path_record_file: 记录文件位置
         """
         self.path_record_file = path_record_file
-        pass
+        self._lock = threading.Lock()
 
     def check_has_record(self) -> typing.Tuple[dict, bool, bool]:
         """检查是否有收藏记录, 如果有则返回记录
@@ -82,7 +83,7 @@ class BotFileDb:
         :return bool: 是否更新成功
         """
         try:
-            with open(self.path_record_file, "w", encoding="utf8") as f:
+            with self._lock, open(self.path_record_file, "w", encoding="utf8") as f:
                 json.dump(
                     record, f, separators=(",", ": "), indent=4, ensure_ascii=False
                 )
@@ -90,6 +91,46 @@ class BotFileDb:
         except Exception as e:
             LOG.error(f"更新收藏记录文件失败: {e}")
             return False
+
+    def get_groups(self) -> list:
+        """获取所有群组"""
+        record, _, _ = self.check_has_record()
+        return record.get("groups", []) if record else []
+
+    def add_group(self, group_id: int, title: str):
+        """添加或更新群组"""
+        record, _, _ = self.check_has_record()
+        if not record:
+            record = {}
+        
+        groups = record.get("groups", [])
+        
+        # 检查群组是否已存在
+        group_exists = False
+        for group in groups:
+            if group["id"] == group_id:
+                group["title"] = title  # 更新标题
+                group_exists = True
+                break
+        
+        if not group_exists:
+            groups.append({"id": group_id, "title": title})
+            
+        record["groups"] = groups
+        self.renew_record(record)
+
+    def remove_group(self, group_id: int):
+        """移除群组"""
+        record, _, _ = self.check_has_record()
+        if not record:
+            return
+
+        groups = record.get("groups", [])
+        groups_to_keep = [g for g in groups if g.get("id") != group_id]
+        
+        if len(groups_to_keep) < len(groups):
+            record["groups"] = groups_to_keep
+            self.renew_record(record)
 
     def record_star_by_name_id(self, star_name: str, star_id: str) -> bool:
         """记录演员
@@ -277,77 +318,56 @@ class BotCacheDb:
     def __init__(self, host: str, port: int, use_cache: str):
         """初始化
 
-        :param str host: ip 地址
-        :param int port: 端口
-        :param str use_cache: 是否使用缓存
+        :param str host: redis host
+        :param int port: redis port
+        :param str use_cache: 是否使用缓存 '1' | '0'
         """
-        self.use_cache = use_cache
-        self.cache = None
-        if self.use_cache == "1":
-            try:
-                self.cache = redis.Redis(host=host, port=port)
-                self.cache.ping()
-                LOG.info(f"连接到 redis 服务: {host}:{port}")
-            except Exception as e:
-                self.cache = None
-                LOG.error(f"无法连接到 redis 服务: {host}:{port} : {e}")
+        self.use_cache = use_cache == "1"
+        if not self.use_cache:
+            return
+        try:
+            self.redis = redis.StrictRedis(
+                host=host, port=port, decode_responses=True, db=0
+            )
+            self.redis.ping()
+            LOG.info("连接到 Redis 缓存")
+        except Exception as e:
+            LOG.error(f"连接 Redis 失败: {e}, 缓存功能已禁用")
+            self.use_cache = False
 
     def remove_cache(self, key: str, type: int):
-        """删除缓存
-
-        :param str key: 键
-        :param int type: 缓存类型
-        """
-        if self.use_cache == "0" or not self.cache:
+        if not self.use_cache:
             return
         try:
-            key = str(key).lower()
-            cache_key = f"{BotCacheDb.TYPE_MAP[type]['prefix']}{key}"
-            self.cache.delete(cache_key)
+            cache_type = self.TYPE_MAP[type]
+            self.redis.delete(f"{cache_type['prefix']}{key}")
         except Exception as e:
-            LOG.error(f"删除缓存: {cache_key} 失败: {e}")
+            LOG.error(f"移除 Redis 缓存失败: key={key}, type={type}, error={e}")
 
     def set_cache(self, key: str, value, type: int, expire=None):
-        """设置缓存
-
-        :param str key: 键
-        :param any value: 值
-        :param int type: 缓存类型
-        :param int expire: 缓存存活时间(s), 默认使用内定时间
-        """
-        if self.use_cache == "0" or not self.cache:
+        if not self.use_cache:
             return
         try:
-            key = str(key).lower()
-            if not expire:
-                expire = BotCacheDb.TYPE_MAP[type]["expire"]
-            prefix = BotCacheDb.TYPE_MAP[type]["prefix"]
-            cache_key = f"{prefix}{key}"
-            if expire != 0:
-                self.cache.set(
-                    name=cache_key,
-                    value=json.dumps(value),
-                    ex=expire,
-                )
+            cache_type = self.TYPE_MAP[type]
+            cache_key = f"{cache_type['prefix']}{key}"
+            cache_value = json.dumps(value)
+            
+            ex = expire if expire is not None else cache_type["expire"]
+            if ex > 0:
+                self.redis.setex(cache_key, ex, cache_value)
             else:
-                self.cache.set(name=cache_key, value=json.dumps(value))
+                self.redis.set(cache_key, cache_value)
         except Exception as e:
-            LOG.error(f"设置缓存: {cache_key} 失败: {e}")
+            LOG.error(f"设置 Redis 缓存失败: key={key}, type={type}, error={e}")
 
     def get_cache(self, key, type: int) -> any:
-        """获取缓存
-
-        :param str key: 键
-        :param int type: 缓存类型
-        :return any: 缓存对象
-        """
-        if self.use_cache == "0" or not self.cache:
-            return
+        if not self.use_cache:
+            return None
         try:
-            key = str(key).lower()
-            cache_key = f"{BotCacheDb.TYPE_MAP[type]['prefix']}{key}"
-            value = self.cache.get(cache_key)
-            if value:
-                return json.loads(value)
+            cache_type = self.TYPE_MAP[type]
+            cache_key = f"{cache_type['prefix']}{key}"
+            value = self.redis.get(cache_key)
+            return json.loads(value) if value else None
         except Exception as e:
-            LOG.error(f"获取缓存: {cache_key} 失败: {e}")
+            LOG.error(f"获取 Redis 缓存失败: key={key}, type={type}, error={e}")
+            return None
