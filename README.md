@@ -4,7 +4,7 @@ A Telegram bot for searching and collecting actresses and movies, with auto-savi
 
 一个用于查询与收藏演员和影片的机器人, 可自动保存磁链到 Pikpak。
 
-Contributions are welcome! Contact me via [akynazh@qq.com](mailto:akynazh@qq.com) or on Telegram [@jackbryant286](https://t.me/jackbryant286).
+Contributions are welcome! Contact me .
 
 [中文文档 (Chinese Documentation)](README.zh-CN.md)
 
